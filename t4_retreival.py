@@ -1,386 +1,299 @@
-
 import os
 import json
 import argparse
 import numpy as np
+import pandas as pd
 from pathlib import Path
-from typing import Optional
 from transformers import pipeline as hf_pipeline
 from langchain_google_genai import ChatGoogleGenerativeAI
 from sentence_transformers import SentenceTransformer
 import librosa
+import dotenv
+dotenv.load_dotenv(override=True)
 
-GEMINI_API_KEY   = os.getenv("GEMINI_API_KEY")
+GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY")
 AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".ogg", ".m4a"}
-INDEX_FILENAME   = "audio_index.json"
+INDEX_FILENAME = "audio_index.csv"
 
-EMOTION_LABEL_MAP = {          # normalise wav2vec2 labels → plain English
-    "ang": "angry",  "hap": "happy", "neu": "neutral",
-    "sad": "sad",    "fea": "fearful", "dis": "disgusted",
-    "cal": "calm",   "exc": "excited",
+EMOTION_LABEL_MAP = {
+    "ang": "angry", "hap": "happy", "neu": "neutral",
+    "sad": "sad", "fea": "fearful", "dis": "disgusted",
+    "cal": "calm", "exc": "excited",
 }
 
-_asr        = None
-_emotion    = None
-_embedder   = None
-_llm        = None
+_asr = None
+_emotion = None
+_embedder = None
+_llm = None
 
-
+# -------------------------------
+# MODELS
+# -------------------------------
 def get_asr():
     global _asr
     if _asr is None:
-        print("⏳  Loading Whisper ASR …")
-        _asr = hf_pipeline("automatic-speech-recognition",
-                            model="openai/whisper-small")
+        print("⏳ Loading Whisper ASR …")
+        _asr = hf_pipeline("automatic-speech-recognition", model="openai/whisper-small")
     return _asr
-
 
 def get_emotion():
     global _emotion
     if _emotion is None:
-        print("⏳  Loading emotion classifier …")
-        _emotion = hf_pipeline("audio-classification",
-                                model="superb/wav2vec2-base-superb-er")
+        print("⏳ Loading emotion classifier …")
+        _emotion = hf_pipeline("audio-classification", model="superb/wav2vec2-base-superb-er")
     return _emotion
-
 
 def get_embedder():
     global _embedder
     if _embedder is None:
-        print("⏳  Loading sentence embedder …")
+        print("⏳ Loading sentence embedder …")
         _embedder = SentenceTransformer("all-MiniLM-L6-v2")
     return _embedder
-
 
 def get_llm():
     global _llm
     if _llm is None:
-        _llm = ChatGoogleGenerativeAI(
-            model="gemini-1.5-flash",
-            api_key=GEMINI_API_KEY,
-            temperature=0.3,
-        )
+        _llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=GEMINI_API_KEY)
     return _llm
 
-
-# ════════════════════════════════════════════════════════════════════════════
-#  STEP 1 — FEATURE EXTRACTION
-# ════════════════════════════════════════════════════════════════════════════
-
+# -------------------------------
+# FEATURE EXTRACTION
+# -------------------------------
 def extract_features(audio_path: str) -> dict:
-    """Return a dict with transcription, top emotion, duration for one file."""
     path = Path(audio_path)
 
-    # Duration
-    y, sr = librosa.load(str(path), sr=None, mono=True)
+    y, sr = librosa.load(str(path), sr=16000, mono=True)
+    y = y / np.max(np.abs(y))  # normalize
     duration = round(librosa.get_duration(y=y, sr=sr), 2)
 
-    # Transcription
-    asr_result = get_asr()(str(path), generate_kwargs={"language": "en"})
-    transcription = asr_result["text"].strip()
+    # Energy (RMS)
+    rms = librosa.feature.rms(y=y)[0]
+    mean_energy = float(np.mean(rms))
 
-    # Emotion — top label
+    # Pitch (F0)
+    try:
+        f0, _, _ = librosa.pyin(y, fmin=librosa.note_to_hz('C2'), fmax=librosa.note_to_hz('C7'))
+        mean_pitch = float(np.nanmean(f0)) if f0 is not None else 0
+    except:
+        mean_pitch = 0
+
+    # ASR transcription
+    asr_result = get_asr()(str(path), generate_kwargs={"language": "en"})
+    transcription = asr_result.get("text", "").strip()
+
+    # Emotion / Tone classification
     emotion_results = get_emotion()(str(path), top_k=3)
     top_emotion = emotion_results[0]["label"].lower()
-    # Map short codes if present
     top_emotion = EMOTION_LABEL_MAP.get(top_emotion, top_emotion)
+
     emotion_scores = {
         EMOTION_LABEL_MAP.get(r["label"].lower(), r["label"].lower()): round(r["score"], 3)
         for r in emotion_results
     }
 
     return {
-        "file":          str(path),
-        "filename":      path.name,
-        "duration":      duration,
+        "file": str(path),
+        "filename": path.name,
+        "duration": duration,
+        "energy": mean_energy,
+        "pitch": mean_pitch,
         "transcription": transcription,
-        "emotion":       top_emotion,
-        "emotion_scores": emotion_scores,
+        "emotion": top_emotion,
+        "emotion_scores": json.dumps(emotion_scores),
     }
 
-
-def build_index(folder: str, index_path: str) -> list[dict]:
-    """Extract features for every audio file in folder, cache to JSON."""
+# -------------------------------
+# CSV INDEXING
+# -------------------------------
+def build_index(folder: str, index_path: str):
     folder_path = Path(folder)
-    audio_files = [
-        f for f in folder_path.iterdir()
-        if f.suffix.lower() in AUDIO_EXTENSIONS
-    ]
+    audio_files = [f for f in folder_path.iterdir() if f.suffix.lower() in AUDIO_EXTENSIONS]
 
     if not audio_files:
         raise FileNotFoundError(f"No audio files found in '{folder}'")
 
-    print(f"\n📂  Indexing {len(audio_files)} audio files in '{folder}' …\n")
-    index = []
+    print(f"\n📂 Indexing {len(audio_files)} files...\n")
 
+    # Load models once
+    get_asr()
+    get_emotion()
+    get_embedder()
+
+    rows = []
     for i, af in enumerate(audio_files, 1):
-        print(f"  [{i}/{len(audio_files)}] {af.name}")
+        print(f"[{i}/{len(audio_files)}] {af.name}")
         try:
-            features = extract_features(str(af))
-            index.append(features)
+            rows.append(extract_features(str(af)))
         except Exception as e:
-            print(f"    ⚠  Skipped ({e})")
+            print(f"⚠ Skipped {af.name}: {e}")
 
-    with open(index_path, "w") as f:
-        json.dump(index, f, indent=2)
+    df = pd.DataFrame(rows)
+    df.to_csv(index_path, index=False)
+    print(f"\n✅ CSV saved → {index_path}\n")
+    return rows
 
-    print(f"\n✅  Index saved → {index_path}\n")
-    return index
-
-
-def load_or_build_index(folder: str) -> list[dict]:
+def load_or_build_index(folder: str):
     index_path = Path(folder) / INDEX_FILENAME
     if index_path.exists():
-        print(f"✅  Loading cached index from {index_path}")
-        with open(index_path) as f:
-            return json.load(f)
+        print(f"✅ Loading existing CSV → {index_path}")
+        df = pd.read_csv(index_path)
+        df["emotion_scores"] = df["emotion_scores"].apply(
+            lambda x: json.loads(x) if isinstance(x, str) else {}
+        )
+        return df.to_dict(orient="records")
     return build_index(folder, str(index_path))
 
-
-# ════════════════════════════════════════════════════════════════════════════
-#  STEP 2 — QUERY PARSING
-# ════════════════════════════════════════════════════════════════════════════
-
-def parse_query(user_query: str) -> dict:
-    """Ask LLM to extract structured parameters from the natural language query."""
+# -------------------------------
+# QUERY PARSING (LLM)
+# -------------------------------
+def parse_query(user_query: str):
     prompt = f"""
-You are a query parser for an audio search engine.
-Extract search parameters from the user's natural language query.
+Extract structured search parameters from this query.
 
-Return ONLY valid JSON with these keys:
-  - "emotion"       : string or null  (e.g. "happy", "sad", "angry", "neutral")
-  - "topic_keywords": list of strings (key content words to match transcription)
-  - "min_duration"  : number or null  (seconds)
-  - "max_duration"  : number or null  (seconds)
-  - "semantic_query": string          (a clean sentence summarising what the user wants,
-                                       used for embedding similarity)
+Return ONLY JSON with:
+emotion, topic_keywords, min_duration, max_duration, min_energy, max_energy, min_pitch, max_pitch, semantic_query
 
-User query: "{user_query}"
-
-JSON:"""
-
+Query: "{user_query}"
+"""
     response = get_llm().invoke(prompt)
     raw = response.content.strip()
-
-    # Strip markdown fences if present
     if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    raw = raw.strip()
-
+        raw = raw.split("```")[1].replace("json", "").strip()
     try:
-        params = json.loads(raw)
-    except json.JSONDecodeError:
-        # Fallback — treat entire query as semantic query
-        params = {
+        return json.loads(raw)
+    except:
+        return {
             "emotion": None,
             "topic_keywords": user_query.split(),
             "min_duration": None,
             "max_duration": None,
+            "min_energy": None,
+            "max_energy": None,
+            "min_pitch": None,
+            "max_pitch": None,
             "semantic_query": user_query,
         }
 
-    print(f"\n🔍  Parsed query parameters:\n{json.dumps(params, indent=2)}\n")
-    return params
-
-
-# ════════════════════════════════════════════════════════════════════════════
-#  STEP 3 — COSINE SIMILARITY MATCHING
-# ════════════════════════════════════════════════════════════════════════════
-
-def make_document_text(entry: dict) -> str:
-    """Combine metadata into a single text blob for embedding."""
+# -------------------------------
+# SEMANTIC SEARCH + FILTERING
+# -------------------------------
+def make_document_text(entry):
     return (
         f"emotion: {entry['emotion']}. "
-        f"transcription: {entry['transcription']}. "
-        f"duration: {entry['duration']} seconds."
+        f"energy: {entry.get('energy',0):.3f}. "
+        f"pitch: {entry.get('pitch',0):.2f}. "
+        f"text: {entry['transcription']}. "
+        f"duration: {entry['duration']}"
     )
 
-
-def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
+def cosine_similarity(a, b):
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9))
 
-
-def filter_and_rank(index: list[dict], params: dict, top_k: int = 10) -> list[dict]:
-    """
-    1. Hard-filter by duration and emotion (if specified).
-    2. Cosine-rank remaining by semantic query.
-    """
+def filter_and_rank(index, params, top_k=10):
     candidates = index
 
-    # Hard filter: duration
+    # Duration filter
     if params.get("min_duration") is not None:
         candidates = [c for c in candidates if c["duration"] >= params["min_duration"]]
     if params.get("max_duration") is not None:
         candidates = [c for c in candidates if c["duration"] <= params["max_duration"]]
 
-    # Soft filter: emotion bonus (don't hard-exclude — let similarity decide)
-    # We'll encode emotion preference into the semantic query instead.
+    # Energy filter
+    if params.get("min_energy") is not None:
+        candidates = [c for c in candidates if c.get("energy",0) >= params["min_energy"]]
+    if params.get("max_energy") is not None:
+        candidates = [c for c in candidates if c.get("energy",0) <= params["max_energy"]]
+
+    # Pitch filter
+    if params.get("min_pitch") is not None:
+        candidates = [c for c in candidates if c.get("pitch") is not None and c["pitch"] >= params["min_pitch"]]
+    if params.get("max_pitch") is not None:
+        candidates = [c for c in candidates if c.get("pitch") is not None and c["pitch"] <= params["max_pitch"]]
 
     if not candidates:
         return []
 
+    # Semantic search using embeddings
     embedder = get_embedder()
-    query_emb = embedder.encode(params["semantic_query"], normalize_embeddings=True)
+    query_emb = embedder.encode(params.get("semantic_query",""), normalize_embeddings=True)
+    docs = [make_document_text(c) for c in candidates]
+    doc_embs = embedder.encode(docs, normalize_embeddings=True)
 
-    doc_texts = [make_document_text(c) for c in candidates]
-    doc_embs  = embedder.encode(doc_texts, normalize_embeddings=True, batch_size=32)
-
-    scored = []
-    for entry, emb in zip(candidates, doc_embs):
+    results = []
+    for c, emb in zip(candidates, doc_embs):
         score = cosine_similarity(query_emb, emb)
-
-        # Boost score if emotion matches
-        if params.get("emotion") and entry["emotion"] == params["emotion"]:
+        if params.get("emotion") and c["emotion"] == params["emotion"]:
             score += 0.15
+        c["similarity_score"] = round(score, 4)
+        results.append(c)
 
-        scored.append({**entry, "similarity_score": round(score, 4)})
+    return sorted(results, key=lambda x: x["similarity_score"], reverse=True)[:top_k]
 
-    scored.sort(key=lambda x: x["similarity_score"], reverse=True)
-    return scored[:top_k]
-
-
-# ════════════════════════════════════════════════════════════════════════════
-#  STEP 4 — LLM RERANKING + EXPLANATION
-# ════════════════════════════════════════════════════════════════════════════
-
-def llm_rerank(user_query: str, candidates: list[dict]) -> list[dict]:
-    """Send top candidates to LLM for final reranking and explanation."""
+# -------------------------------
+# LLM RERANK
+# -------------------------------
+def llm_rerank(query, candidates):
     if not candidates:
         return []
-
-    candidate_lines = "\n".join(
-        f'{i+1}. File: {c["filename"]} | Emotion: {c["emotion"]} | '
-        f'Duration: {c["duration"]}s | Similarity: {c["similarity_score"]} | '
-        f'Transcription: "{c["transcription"]}"'
+    text = "\n".join(
+        f'{i+1}. {c["filename"]} | {c["emotion"]} | {c["duration"]}s | {c["transcription"]}'
         for i, c in enumerate(candidates)
     )
-
     prompt = f"""
-You are an intelligent audio search assistant.
-A user searched for: "{user_query}"
+Re-rank these for query: "{query}"
 
-Below are the top candidate audio files ranked by semantic similarity.
-Your task:
-1. Re-rank them based on how well they match the user's intent.
-2. Return ONLY valid JSON: a list of objects, each with:
-   - "rank"       : integer (1 = best)
-   - "filename"   : string
-   - "reason"     : one sentence explaining why this file matches
+{text}
 
-Candidates:
-{candidate_lines}
-
-JSON:"""
-
+Return JSON list with rank, filename, reason
+"""
     response = get_llm().invoke(prompt)
     raw = response.content.strip()
-
     if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    raw = raw.strip()
-
+        raw = raw.split("```")[1].replace("json", "").strip()
     try:
-        rankings = json.loads(raw)
-    except json.JSONDecodeError:
-        # Fallback: return as-is with no reranking
-        return [
-            {**c, "rank": i+1, "reason": "Ranked by cosine similarity."}
-            for i, c in enumerate(candidates[:5])
-        ]
+        ranking = json.loads(raw)
+    except:
+        return candidates[:5]
+    lookup = {c["filename"]: c for c in candidates}
+    final = []
+    for r in ranking:
+        c = lookup.get(r["filename"], {})
+        final.append({**c, "rank": r["rank"], "reason": r["reason"]})
+    return final[:5]
 
-    # Merge LLM ranks back with full metadata
-    filename_to_meta = {c["filename"]: c for c in candidates}
-    results = []
-    for r in sorted(rankings, key=lambda x: x.get("rank", 99)):
-        fname = r.get("filename", "")
-        meta  = filename_to_meta.get(fname, {})
-        results.append({
-            "rank":              r.get("rank"),
-            "filename":         fname,
-            "file":             meta.get("file", fname),
-            "emotion":          meta.get("emotion"),
-            "duration":         meta.get("duration"),
-            "transcription":    meta.get("transcription"),
-            "similarity_score": meta.get("similarity_score"),
-            "reason":           r.get("reason", ""),
-        })
-
-    return results[:5]
-
-
-# ════════════════════════════════════════════════════════════════════════════
-#  PUBLIC API
-# ════════════════════════════════════════════════════════════════════════════
-
-def semantic_audio_query(
-    query: str,
-    folder: str,
-    rebuild_index: bool = False,
-) -> list[dict]:
-    """
-    Main entry point.
-
-    Args:
-        query:         Natural language query, e.g. "happy audio about greetings"
-        folder:        Path to audio folder
-        rebuild_index: Force re-extraction even if index.json exists
-
-    Returns:
-        List of top-5 dicts, each with: rank, filename, emotion, duration,
-        transcription, similarity_score, reason
-    """
-    # 1. Index
-    if rebuild_index:
-        index_path = Path(folder) / INDEX_FILENAME
-        index_path.unlink(missing_ok=True)
+# -------------------------------
+# MAIN PIPELINE
+# -------------------------------
+def semantic_audio_query(query, folder, rebuild=False):
+    if rebuild:
+        (Path(folder) / INDEX_FILENAME).unlink(missing_ok=True)
     index = load_or_build_index(folder)
-
-    # 2. Parse query
     params = parse_query(query)
+    candidates = filter_and_rank(index, params)
+    return llm_rerank(query, candidates)
 
-    # 3. Cosine similarity — get top 10 for LLM reranking
-    top_candidates = filter_and_rank(index, params, top_k=10)
-
-    if not top_candidates:
-        print("⚠  No candidates found after filtering.")
-        return []
-
-    # 4. LLM rerank → final top 5
-    results = llm_rerank(query, top_candidates)
-
-    return results
-
-
-
-def pretty_print(results: list[dict]) -> None:
-    print("\n" + "═" * 60)
-    print("  🎧  TOP RESULTS")
-    print("═" * 60)
+# -------------------------------
+# PRINT
+# -------------------------------
+def pretty_print(results):
+    print("\n" + "="*50)
+    print("TOP RESULTS")
+    print("="*50)
     for r in results:
-        print(f"\n  #{r['rank']}  {r['filename']}")
-        print(f"      Emotion   : {r['emotion']}")
-        print(f"      Duration  : {r['duration']}s")
-        print(f"      Similarity: {r['similarity_score']}")
-        print(f"      Text      : \"{r['transcription']}\"")
-        print(f"      Why       : {r['reason']}")
-    print("\n" + "═" * 60)
-
+        print(f"\n#{r.get('rank')} {r['filename']}")
+        print("Emotion:", r["emotion"])
+        print("Duration:", r["duration"])
+        print("Energy:", round(r.get("energy",0), 3))
+        print("Pitch:", round(r.get("pitch",0), 2))
+        print("Score:", r.get("similarity_score"))
+        print("Text:", r["transcription"])
+        print("Why:", r.get("reason"))
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Semantic Audio Query System")
-    parser.add_argument("--folder",  required=True,  help="Path to audio folder (e.g. CREMA-D)")
-    parser.add_argument("--query",   required=True,  help="Natural language query")
-    parser.add_argument("--rebuild", action="store_true", help="Force rebuild index")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--folder", required=True)
+    parser.add_argument("--query", required=True)
+    parser.add_argument("--rebuild", action="store_true")
     args = parser.parse_args()
-
-    results = semantic_audio_query(
-        query=args.query,
-        folder=args.folder,
-        rebuild_index=args.rebuild,
-    )
-
+    results = semantic_audio_query(query=args.query, folder=args.folder, rebuild=args.rebuild)
     pretty_print(results)

@@ -1,3 +1,5 @@
+sentence-transformers==2.7.0
+langchain-google-genai==1.0.3
 torch==2.2.2
 torchaudio==2.2.2
 transformers==4.38.2
@@ -10,3 +12,4 @@ numpy==1.26.4
 scipy==1.11.4
 
 tqdm==4.66.2
+
