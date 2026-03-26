@@ -13,6 +13,7 @@ from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCh
 from tensorflow.keras.utils     import to_categorical
 import librosa
 import soundfile as sf
+from t1_feature_extraction import extract_features
 
 PROCESSED_DIR = "processed"
 MODEL_PATH    = "emotion_model.keras"  
@@ -130,8 +131,6 @@ for i, cls in enumerate(le.classes_):
     cls_acc  = np.mean(y_pred[mask] == i)
     print(f"  {cls:10s}: {cls_acc*100:.1f}%  ({mask.sum()} samples)")
 
-
-from t1_feature_extraction import extract_features
 
 def predict_emotion(file_path: str) -> str:
     """Predict emotion from a WAV file path."""
