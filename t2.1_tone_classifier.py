@@ -15,10 +15,9 @@ No labelled training data is needed. Tone is detected via a 3-stage pipeline:
 Supported tones
 ───────────────
   • suspense          – building tension, unresolved stakes
-  • calm_description  – steady, informative, low-affect narration
+  • calm  – steady, informative, low-affect narration
   • urgency           – fast-paced, high-stakes, time-pressured
   • dramatic_emphasis – heightened emotion, deliberate pacing, emphasis
-  • character_dialogue – distinct voice / persona, conversational
 
 Usage
 ─────
@@ -44,19 +43,17 @@ dotenv.load_dotenv(override=True)
 # ──────────────────────────────────────────────────────────────────────────────
 TONES = [
     "suspense",
-    "calm_description",
+    "calm",
     "urgency",
     "dramatic_emphasis",
-    "character_dialogue",
 ]
 
 # Human-readable hypothesis templates fed to NLI model
 TONE_HYPOTHESES = {
     "suspense":          "This audio contains tense, suspenseful narration with a sense of danger or mystery.",
-    "calm_description":  "This audio contains calm, steady, descriptive narration with no urgency or strong emotion.",
+    "calm":  "This audio contains calm, steady narration with no urgency or strong emotion.",
     "urgency":           "This audio conveys urgency, haste, or time pressure with fast-paced speech.",
     "dramatic_emphasis": "This audio has dramatic, emotionally heightened narration with deliberate pauses and emphasis.",
-    "character_dialogue":"This audio features a distinct character voice or conversational dialogue performance.",
 }
 
 AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".ogg", ".m4a"}
@@ -187,10 +184,9 @@ def acoustic_adjustments(scores: dict[str, float], acf: dict) -> dict[str, float
     Heuristic rationale
     ───────────────────
     suspense          → low sustained energy, wide pitch range, slow tempo
-    calm_description  → low energy variance, moderate pitch, moderate ZCR
+    calm  → low energy variance, moderate pitch, moderate ZCR
     urgency           → high energy, high ZCR, fast tempo
     dramatic_emphasis → high energy variance (dynamic), wide pitch swings
-    character_dialogue→ high pitch variance (character voices), moderate rate
     """
     adj = dict(scores)
     if not acf:
@@ -211,7 +207,7 @@ def acoustic_adjustments(scores: dict[str, float], acf: dict) -> dict[str, float
 
     # calm_description: low variance in everything
     if std_e < 0.006 and std_p < 25 and zcr < 0.06:
-        adj["calm_description"] = min(1.0, adj.get("calm_description", 0) + 0.12)
+        adj["calm"] = min(1.0, adj.get("calm", 0) + 0.12)
 
     # urgency: loud + fast
     if e > 0.07 and (zcr > 0.07 or tempo > 130):
@@ -222,11 +218,6 @@ def acoustic_adjustments(scores: dict[str, float], acf: dict) -> dict[str, float
         adj["dramatic_emphasis"] = min(1.0, adj.get("dramatic_emphasis", 0) + 0.10)
     if e > 0.08:
         adj["dramatic_emphasis"] = min(1.0, adj.get("dramatic_emphasis", 0) + 0.05)
-
-    # character_dialogue: high pitch variance (distinct voices / inflections)
-    if std_p > 50:
-        adj["character_dialogue"] = min(1.0, adj.get("character_dialogue", 0) + 0.12)
-
     return {k: round(v, 4) for k, v in adj.items()}
 
 
@@ -238,10 +229,9 @@ Classify the dominant narrative tone of the following audio clip.
 
 Possible tones:
   • suspense          – building tension, unresolved stakes, hushed dread
-  • calm_description  – steady, informative narration, low affect
+  • calm  – steady, informative narration, low affect
   • urgency           – fast-paced, high-stakes, time-pressured delivery
   • dramatic_emphasis – emotionally heightened, deliberate pacing, strong emphasis
-  • character_dialogue – distinct character voice / accent, conversational persona
 
 Evidence:
   Transcription : "{transcription}"
@@ -342,33 +332,24 @@ def classify_tone(audio_path: str, use_llm: bool = True) -> dict:
     }
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Narrative tone classifier for TableTalk audio")
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--file",   help="Single audio file to classify")
-    group.add_argument("--folder", help="Folder of audio files (batch mode)")
-    parser.add_argument("--no-llm", action="store_true", help="Skip LLM stage (faster, less accurate)")
-    parser.add_argument("--csv",    default=None,         help="Save results to this CSV path")
-    args = parser.parse_args()
-
-    use_llm = not args.no_llm
-
-    # Pre-load models
+    folder = "test_processed"
+    output_csv = "outputs/bart_output.csv"
+    use_llm = False 
     get_asr()
     get_nli()
     if use_llm:
         get_llm()
     print("\n✅ Models ready.\n")
 
-    if args.file:
-        files = [args.file]
-    else:
-        folder = args.folder
-        files  = [
-            os.path.join(folder, f) for f in os.listdir(folder)
-            if os.path.splitext(f)[1].lower() in AUDIO_EXTENSIONS
-        ]
-        print(f"📂 Found {len(files)} audio file(s) in '{folder}'\n")
+    # Get audio files
+    files = [
+        os.path.join(folder, f)
+        for f in os.listdir(folder)
+        if os.path.isfile(os.path.join(folder, f)) and
+           os.path.splitext(f)[1].lower() in AUDIO_EXTENSIONS
+    ]
 
+    print(f"📂 Found {len(files)} audio file(s) in '{folder}'\n")
     rows = []
     for f in files:
         try:
@@ -383,14 +364,13 @@ if __name__ == "__main__":
                 **result["acf"],
             })
         except Exception as e:
-            print(f"  ⚠ Error processing {f}: {e}")
+            print(f"⚠ Error processing {f}: {e}")
 
-    if args.csv and rows:
-        pd.DataFrame(rows).to_csv(args.csv, index=False)
-        print(f"\n✅ Results saved → {args.csv}")
-
+    # Save CSV
     if rows:
-        print(f"\n📊 Summary  ({len(rows)} file(s))")
+        pd.DataFrame(rows).to_csv(output_csv, index=False)
+        print(f"\n✅ Results saved → {output_csv}")
+        print(f"\n📊 Summary ({len(rows)} file(s))")
         tone_counts = pd.Series([r["tone"] for r in rows]).value_counts()
         for tone, count in tone_counts.items():
             print(f"   {tone:<22s} {count}")

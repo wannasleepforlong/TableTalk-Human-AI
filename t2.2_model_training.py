@@ -2,6 +2,7 @@ import os
 import pickle
 import numpy as np
 
+from sklearn.metrics import classification_report, confusion_matrix
 from sklearn.model_selection    import train_test_split
 from sklearn.preprocessing      import LabelEncoder, StandardScaler
 from sklearn.utils.class_weight import compute_class_weight
@@ -13,22 +14,59 @@ from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCh
 from tensorflow.keras.utils     import to_categorical
 import librosa
 import soundfile as sf
-from t1_feature_extraction import extract_features
+from t1_feature_extraction import extract_features_from_array
 
-PROCESSED_DIR = "test"
+import pandas as pd
+
+# ─── CONFIG ──────────────────────────────────────────────────────────────────
+PROCESSED_DIR = "tes_processed"
+OUTPUT_DIR    = "outputs"
 MODEL_PATH    = "emotion_model.keras"  
 ENCODER_PATH  = "label_encoder.pkl"
-SCALER_PATH   = os.path.join(PROCESSED_DIR, "scaler.pkl")
+SCALER_PATH   = os.path.join(OUTPUT_DIR, "scaler.pkl")
 PLOT_PATH     = "training_history.png"
 
 TARGET_SR = 22050
 N_MFCC    = 40
+import os
 
 # ─── LOAD DATA ────────────────────────────────────────────────────────────────
-X = np.load(os.path.join(PROCESSED_DIR, "X.npy"))
-y_raw = np.load(os.path.join(PROCESSED_DIR, "y.npy"))
+features_df = pd.read_csv(os.path.join("outputs", "features_scaled.csv"))
+labels_df   = pd.read_csv(os.path.join("outputs", "bart_output.csv"))
 
-print(f"Loaded X: {X.shape},  y: {y_raw.shape}")
+features_df['filename'] = features_df['filename'].astype(str)
+labels_df['filename']   = labels_df['filename'].astype(str)
+
+merged_df = pd.merge(features_df, labels_df[['filename', 'tone']], 
+                     on='filename', how='inner')
+feature_files = set(features_df['filename'])
+label_files   = set(labels_df['filename'])
+
+not_in_labels   = feature_files - label_files
+not_in_features = label_files - feature_files
+
+print(f"❌ Not found in labels      : {len(not_in_labels)}")
+print(f"❌ Not found in features    : {len(not_in_features)}")
+
+X_df = merged_df.drop(columns=['filename', 'tone'])
+X = X_df.values.astype(np.float32)
+
+y_raw = merged_df['tone'].values
+
+if len(y_raw) == 0:
+    print("❌ ERROR: No matching samples found!")
+    exit(1)
+
+print(f"\nFinal X shape: {X.shape},  y shape: {y_raw.shape}")
+print(f"Classes : {np.unique(y_raw)}")
+
+if len(y_raw) == 0:
+    print("❌ ERROR: No matching samples found after join!")
+    print(f"Features head:\n{features_df['filename'].head()}")
+    print(f"Labels head:\n{labels_df['filename'].head()}")
+    exit(1)
+
+print(f"Final X shape: {X.shape},  y shape: {y_raw.shape}")
 print(f"Classes : {np.unique(y_raw)}")
 
 # ─── ENCODE LABELS ────────────────────────────────────────────────────────────
@@ -76,22 +114,10 @@ input_dim = X_train.shape[1]   # 193 with the improved feature set
 model = Sequential([
     Input(shape=(input_dim,)),
 
-    # Block 1
-    Dense(512, activation="relu"),
-    BatchNormalization(),
-    Dropout(0.3),
-
-    # Block 2
-    Dense(256, activation="relu"),
-    BatchNormalization(),
-    Dropout(0.3),
-
-    # Block 3
     Dense(128, activation="relu"),
     BatchNormalization(),
     Dropout(0.3),
 
-    # Block 4
     Dense(64, activation="relu"),
     BatchNormalization(),
     Dropout(0.2),
@@ -109,11 +135,10 @@ model.summary()
 
 history = model.fit(
     X_train, y_train,
-    epochs=150,              # EarlyStopping will stop well before this
+    epochs=50,              # EarlyStopping will stop well before this
     batch_size=32,
     validation_data=(X_test, y_test),
     class_weight=class_weight_dict,
-    # callbacks=callbacks,
     verbose=1,
 )
 
@@ -124,26 +149,39 @@ print(f"Test Accuracy : {acc*100:.2f}%")
 print(f"Test Loss     : {loss:.4f}")
 print(f"{'='*40}\n")
 
-# Per-class accuracy
-y_pred      = np.argmax(model.predict(X_test, verbose=0), axis=1)
+
+# Predictions
+y_pred = np.argmax(model.predict(X_test, verbose=0), axis=1)
+
+print(f"\n{'='*40}")
+print(f"Test Accuracy : {acc*100:.2f}%")
+print(f"Test Loss     : {loss:.4f}")
+print(f"{'='*40}\n")
+
+
+print("📊 Classification Report:\n")
+report = classification_report(
+    y_enc_test,
+    y_pred,
+    target_names=le.classes_,
+    digits=4
+)
+print(report)
+
+cm = confusion_matrix(y_enc_test, y_pred)
+
+print("📊 Confusion Matrix:\n")
+print(cm)
+
+cm_df = pd.DataFrame(cm, index=le.classes_, columns=le.classes_)
+print("\n📊 Confusion Matrix (Readable):\n")
+print(cm_df)
+
+
+print("\n📊 Per-class Accuracy:\n")
 for i, cls in enumerate(le.classes_):
-    mask     = y_enc_test == i
-    cls_acc  = np.mean(y_pred[mask] == i)
-    print(f"  {cls:10s}: {cls_acc*100:.1f}%  ({mask.sum()} samples)")
-
-
-def predict_emotion(file_path: str) -> str:
-    """Predict emotion from a WAV file path."""
-    y, sr = librosa.load(file_path, sr=TARGET_SR, mono=True)
-    y, _  = librosa.effects.trim(y, top_db=20)
-    peak  = np.max(np.abs(y))
-    if peak > 0:
-        y = y / peak
-
-    feat    = extract_features(y, sr).reshape(1, -1)
-    feat    = scaler.transform(feat)
-    pred_id = np.argmax(model.predict(feat, verbose=0), axis=1)
-    return le.inverse_transform(pred_id)[0]
-
-
-print(predict_emotion("CREMA-D/1091_WSI_NEU_XX.wav"))
+    mask = (y_enc_test == i)
+    if np.sum(mask) == 0:
+        continue
+    cls_acc = np.mean(y_pred[mask] == i)
+    print(f"{cls:<20s}: {cls_acc*100:.2f}%")
