@@ -15,20 +15,23 @@ from tensorflow.keras.utils     import to_categorical
 import librosa
 import soundfile as sf
 from t1_feature_extraction import extract_features_from_array
-
+import random
 import pandas as pd
 
-# ─── CONFIG ──────────────────────────────────────────────────────────────────
-PROCESSED_DIR = "tes_processed"
-OUTPUT_DIR    = "outputs"
-MODEL_PATH    = "emotion_model.keras"  
-ENCODER_PATH  = "label_encoder.pkl"
-SCALER_PATH   = os.path.join(OUTPUT_DIR, "scaler.pkl")
-PLOT_PATH     = "training_history.png"
 
-TARGET_SR = 22050
-N_MFCC    = 40
-import os
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+tf.random.set_seed(SEED)
+
+# ─── CONFIG ──────────────────────────────────────────────────────────────────
+PROCESSED_DIR = "test_processed"
+OUTPUT_DIR    = "outputs"
+MODEL_PATH    = os.path.join(OUTPUT_DIR, "emotion_model.keras")  
+ENCODER_PATH  = os.path.join(OUTPUT_DIR, "label_encoder.pkl")
+SCALER_PATH   = os.path.join(OUTPUT_DIR, "scaler.pkl")
+PLOT_PATH     = os.path.join(OUTPUT_DIR, "training_history.png")
+
 
 # ─── LOAD DATA ────────────────────────────────────────────────────────────────
 features_df = pd.read_csv(os.path.join("outputs", "features_scaled.csv"))
@@ -82,7 +85,7 @@ print(f"Classes ({n_classes}): {list(le.classes_)}")
 # ─── TRAIN / TEST SPLIT ───────────────────────────────────────────────────────
 X_train, X_test, y_train, y_test, y_enc_train, y_enc_test = train_test_split(
     X, y_cat, y_encoded,
-    test_size=0.2,
+    test_size=0.1,
     random_state=42,
     stratify=y_encoded,
 )
@@ -144,31 +147,38 @@ history = model.fit(
 
 # ─── EVALUATION ───────────────────────────────────────────────────────────────
 loss, acc = model.evaluate(X_test, y_test, verbose=0)
+
 print(f"\n{'='*40}")
 print(f"Test Accuracy : {acc*100:.2f}%")
 print(f"Test Loss     : {loss:.4f}")
 print(f"{'='*40}\n")
-
 
 # Predictions
 y_pred = np.argmax(model.predict(X_test, verbose=0), axis=1)
 
-print(f"\n{'='*40}")
-print(f"Test Accuracy : {acc*100:.2f}%")
-print(f"Test Loss     : {loss:.4f}")
-print(f"{'='*40}\n")
+# 🔍 DEBUG (important)
+print("Unique y_test:", np.unique(y_enc_test))
+print("Unique y_pred:", np.unique(y_pred))
+print("All classes  :", list(le.classes_))
 
-
+# ✅ FIX: Use LabelEncoder classes directly
 print("📊 Classification Report:\n")
 report = classification_report(
     y_enc_test,
     y_pred,
+    labels=np.arange(len(le.classes_)),   # ensures correct alignment
     target_names=le.classes_,
-    digits=4
+    digits=4,
+    zero_division=0
 )
 print(report)
 
-cm = confusion_matrix(y_enc_test, y_pred)
+# ─── CONFUSION MATRIX ────────────────────────────────────────────────────────
+cm = confusion_matrix(
+    y_enc_test,
+    y_pred,
+    labels=np.arange(len(le.classes_))
+)
 
 print("📊 Confusion Matrix:\n")
 print(cm)
@@ -177,11 +187,12 @@ cm_df = pd.DataFrame(cm, index=le.classes_, columns=le.classes_)
 print("\n📊 Confusion Matrix (Readable):\n")
 print(cm_df)
 
-
+# ─── PER-CLASS ACCURACY ──────────────────────────────────────────────────────
 print("\n📊 Per-class Accuracy:\n")
 for i, cls in enumerate(le.classes_):
     mask = (y_enc_test == i)
     if np.sum(mask) == 0:
+        print(f"{cls:<20s}: No samples")
         continue
     cls_acc = np.mean(y_pred[mask] == i)
     print(f"{cls:<20s}: {cls_acc*100:.2f}%")

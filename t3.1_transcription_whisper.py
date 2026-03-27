@@ -6,7 +6,7 @@ from tqdm import tqdm
 
 TEST_FOLDER = "test"
 GT_PATH = os.path.join(TEST_FOLDER, "ground_truth.txt")
-MODEL_ID = "openai/whisper-small"
+MODEL_ID = "openai/whisper-tiny"
 
 
 asr = pipeline("automatic-speech-recognition", model=MODEL_ID)
@@ -63,5 +63,5 @@ else:
     print("❌ No valid samples processed.")
 
 
-# WER: 0.0370
-# CER: 0.0234
+# WER: 0.0818
+# CER: 0.0439

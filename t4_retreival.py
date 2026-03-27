@@ -14,15 +14,13 @@ import dotenv
 dotenv.load_dotenv(override=True)
 
 AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".ogg", ".m4a"}
-INDEX_FILENAME   = "audio_index.csv"
 MISTRAL_API_KEY  = os.getenv("MISTRAL_API_KEY")
 TONES = [
-    "character_dialogue", 
-    "suspense", 
-    "dramatic_emphasis", 
-    "urgency", 
-    "calm_description"
-]
+    "suspense",
+    "calm",
+    "urgency",
+    "dramatic_emphasis"]
+
 RETRIEVAL_PARAMS = {
     "weights": {
         "text": 0.5,
@@ -110,21 +108,16 @@ def load_index(csv_path: str = "outputs/bart_output.csv") -> list[dict]:
     df = pd.read_csv(csv_path)
     return df.to_dict(orient="records")
 
-
-# ──────────────────────────────────────────────
-# STEP 1 — LLM QUERY PARSING
-# ──────────────────────────────────────────────
 _PARSE_PROMPT = """You are an audio retrieval assistant. Parse the user query into structured JSON requirements.
 
 Return ONLY valid JSON with these exact keys:
 {{
   "semantic_query":  "<string>",     // Optimized English description for vector search on transcription
   "tone_vector": {{                   // Score each tone from 0.0 to 1.0 based on user's desire
-    "character_dialogue": <float>,
     "suspense": <float>,
     "dramatic_emphasis": <float>,
     "urgency": <float>,
-    "calm_description": <float>
+    "calm": <float>
   }},
   "duration_level":  "<High|Medium|Low|None>",
   "energy_level":    "<High|Medium|Low|None>",
@@ -254,42 +247,45 @@ def pretty_print(results: list[dict]):
 
 
 # ──────────────────────────────────────────────
-# CLI
+# SIMPLE INTERACTIVE MODE (NO CLI)
 # ──────────────────────────────────────────────
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Semantic audio retrieval with LLM")
-    parser.add_argument("--query",   default=None,           help="Search query (omit for interactive mode)")
-    parser.add_argument("--top",     type=int, default=5,    help="Number of results to return")
-    parser.add_argument("--model",   choices=["local", "mistral"], default="local", help="LLM backend to use")
-    args = parser.parse_args()
+    
+    print("🎤 Semantic Audio Retrieval\n")
 
-    if args.query:
-        # Pre-load for CLI
-        index    = load_index()
-        llm      = get_llm(model_type=args.model)
-        embedder = get_embedder()
-        
-        params   = parse_query(args.query, llm)
-        results  = hybrid_rank(index, params, embedder, top_k=args.top)
-        pretty_print(results)
+    print("Select LLM Backend:")
+    print("1. Local (TinyLlama)")
+    print("2. Mistral API")
+
+    choice = input("Enter choice (1/2): ").strip()
+
+    if choice == "2" and MISTRAL_API_KEY:
+        model_type = "mistral"
     else:
-        # Interactive
-        index    = load_index()
-        llm      = get_llm(model_type=args.model)
-        embedder = get_embedder()
-        print(f"✅ Models & Data ready (Backend: {args.model}).\n")
-        
-        print("🎤 Interactive Audio Retrieval Mode  (type 'exit' to quit)\n")
-        while True:
-            try:
-                q = input("Query > ").strip()
-                if not q or q.lower() in ("exit", "quit"):
-                    break
-                
-                params  = parse_query(q, llm)
-                print(f"🔍 Parsed: {json.dumps(params, indent=2)}")
-                results = hybrid_rank(index, params, embedder, top_k=args.top)
-                pretty_print(results)
-            except Exception as e:
-                print(f"❌ Error: {e}")
-                
+        if choice == "2" and not MISTRAL_API_KEY:
+            print("⚠ MISTRAL_API_KEY not found. Falling back to LOCAL model.\n")
+        model_type = "local"
+
+
+    index = load_index()
+    llm = get_llm(model_type=model_type)
+    embedder = get_embedder()
+
+    print(f"\n✅ Ready! Using: {model_type.upper()}")
+    print("Type 'exit' to quit.\n")
+
+    while True:
+        try:
+            query = input("Query > ").strip()
+
+            if not query or query.lower() in ("exit", "quit"):
+                print("👋 Exiting...")
+                break
+
+            params = parse_query(query, llm)
+            print(f"\n🔍 Parsed:\n{json.dumps(params, indent=2)}")
+            results = hybrid_rank(index, params, embedder, top_k=3)
+            pretty_print(results)
+
+        except Exception as e:
+            print(f"❌ Error: {e}")

@@ -19,9 +19,12 @@ SEGMENT_HOP      = 12.0
 os.makedirs(SAVE_PATH, exist_ok=True)
 os.makedirs(PROCESSED_PATH, exist_ok=True)
 
-# -------------------------------
-# Segmentation Helper
-# -------------------------------
+def normalize_audio(audio, target_rms=0.03):
+    rms = np.sqrt(np.mean(audio**2))
+    if rms > 0:
+        audio = audio * (target_rms / rms)
+    return audio
+
 def segment_audio(audio, sr, max_duration=SEGMENT_DURATION, hop=SEGMENT_HOP):
     """
     Splits `audio` into overlapping segments of `max_duration` seconds,
@@ -148,6 +151,8 @@ def extract_features(file_path, n_mfcc=40, save_audio=False, processed_path=None
             audio = np.mean(audio, axis=1)
         # Trim leading/trailing silence
         audio, _ = librosa.effects.trim(audio)
+        #normalize
+        audio = normalize_audio(audio)
         # Segment if necessary
         segments = segment_audio(audio, sr,
                                   max_duration=SEGMENT_DURATION,
