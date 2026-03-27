@@ -19,7 +19,7 @@ import random
 import pandas as pd
 
 
-SEED = 42
+SEED = 55
 random.seed(SEED)
 np.random.seed(SEED)
 tf.random.set_seed(SEED)
@@ -34,7 +34,7 @@ PLOT_PATH     = os.path.join(OUTPUT_DIR, "training_history.png")
 
 
 # ─── LOAD DATA ────────────────────────────────────────────────────────────────
-features_df = pd.read_csv(os.path.join("outputs", "features_scaled.csv"))
+features_df = pd.read_csv(os.path.join("outputs", "features.csv"))
 labels_df   = pd.read_csv(os.path.join("outputs", "bart_output.csv"))
 
 features_df['filename'] = features_df['filename'].astype(str)
@@ -78,19 +78,17 @@ y_encoded = le.fit_transform(y_raw)
 n_classes = len(le.classes_)
 y_cat     = to_categorical(y_encoded, num_classes=n_classes)
 
-with open(ENCODER_PATH, "wb") as f:
-    pickle.dump(le, f)
+# with open(ENCODER_PATH, "wb") as f:
+#     pickle.dump(le, f)
 print(f"Classes ({n_classes}): {list(le.classes_)}")
 
-# ─── TRAIN / TEST SPLIT ───────────────────────────────────────────────────────
 X_train, X_test, y_train, y_test, y_enc_train, y_enc_test = train_test_split(
     X, y_cat, y_encoded,
-    test_size=0.1,
-    random_state=42,
+    test_size=0.3,
     stratify=y_encoded,
 )
 
-# ─── SCALE FEATURES (fit on train only — no leakage) ─────────────────────────
+# ─── SCALE FEATURES (fit on train only — no leakage) ───1─────────────────────
 # NOTE: If you ran extract_features.py with scaling already applied,
 #       skip the block below and load the saved scaler instead.
 #       Here we refit on the training split to be safe.
@@ -98,33 +96,23 @@ scaler = StandardScaler()
 X_train = scaler.fit_transform(X_train)
 X_test  = scaler.transform(X_test)
 
-with open(SCALER_PATH, "wb") as f:
-    pickle.dump(scaler, f)
+# with open(SCALER_PATH, "wb") as f:
+#     pickle.dump(scaler, f)
 print("Scaler fit on training data and saved.")
 
-# ─── CLASS WEIGHTS ────────────────────────────────────────────────────────────
-class_weights = compute_class_weight(
-    class_weight="balanced",
-    classes=np.unique(y_enc_train),
-    y=y_enc_train,
-)
-class_weight_dict = dict(enumerate(class_weights))
-print(f"Class weights: {class_weight_dict}")
-
-# ─── MODEL ────────────────────────────────────────────────────────────────────
 input_dim = X_train.shape[1]   # 193 with the improved feature set
 
 model = Sequential([
     Input(shape=(input_dim,)),
-
-    Dense(128, activation="relu"),
-    BatchNormalization(),
-    Dropout(0.3),
-
     Dense(64, activation="relu"),
     BatchNormalization(),
     Dropout(0.2),
-
+    Dense(32, activation="relu"),
+    BatchNormalization(),
+    Dropout(0.2),
+    Dense(16, activation="relu"),
+    BatchNormalization(),
+    Dropout(0.2),
     # Output
     Dense(n_classes, activation="softmax"),
 ])
@@ -138,10 +126,8 @@ model.summary()
 
 history = model.fit(
     X_train, y_train,
-    epochs=50,              # EarlyStopping will stop well before this
+    epochs=50,        
     batch_size=32,
-    validation_data=(X_test, y_test),
-    class_weight=class_weight_dict,
     verbose=1,
 )
 
@@ -196,3 +182,7 @@ for i, cls in enumerate(le.classes_):
         continue
     cls_acc = np.mean(y_pred[mask] == i)
     print(f"{cls:<20s}: {cls_acc*100:.2f}%")
+
+
+print("Training samples used:", len(X_train))
+print("Test samples used:", len(X_test))

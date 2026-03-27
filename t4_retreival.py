@@ -52,7 +52,6 @@ class TinyLlamaLLM:
         self.model = AutoModelForCausalLM.from_pretrained(
             model_id, 
             torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-            device_map="auto"
         )
         self.pipeline = hf_pipeline(
             "text-generation",
@@ -190,13 +189,13 @@ def hybrid_rank(index: list[dict], params: dict, embedder, top_k: int = 12) -> l
                 low, high = thresh[feat]["low"], thresh[feat]["high"]
                 
                 feat_score = 0.0
-                if level == "High" and val > high:
+                if level == "High" and val >= high:
                     feat_score = 1.0
                 elif level == "Medium" and low <= val <= high:
                     feat_score = 1.0
-                elif level == "Low" and val < low:
+                elif level == "Low" and val <= low:
                     feat_score = 1.0
-                
+        
                 num_score += feat_score
                 active_features += 1
         
@@ -266,22 +265,18 @@ if __name__ == "__main__":
             print("⚠ MISTRAL_API_KEY not found. Falling back to LOCAL model.\n")
         model_type = "local"
 
-
     index = load_index()
     llm = get_llm(model_type=model_type)
     embedder = get_embedder()
-
-    print(f"\n✅ Ready! Using: {model_type.upper()}")
+    print(f"\nReady! Using: {model_type.upper()}")
     print("Type 'exit' to quit.\n")
 
     while True:
         try:
             query = input("Query > ").strip()
-
             if not query or query.lower() in ("exit", "quit"):
                 print("👋 Exiting...")
                 break
-
             params = parse_query(query, llm)
             print(f"\n🔍 Parsed:\n{json.dumps(params, indent=2)}")
             results = hybrid_rank(index, params, embedder, top_k=3)

@@ -3,39 +3,17 @@ import os
 import librosa
 import soundfile as sf
 from tqdm import tqdm
-from sklearn.preprocessing import StandardScaler
-import joblib
 import pandas as pd
 
-# -------------------------------
-# CONFIG
-# -------------------------------
 DATASET_PATH = "test"
-SAVE_PATH = "outputs"
 PROCESSED_PATH = "test_processed"
 SEGMENT_DURATION = 15.0  
 SEGMENT_HOP      = 12.0 
 
-os.makedirs(SAVE_PATH, exist_ok=True)
 os.makedirs(PROCESSED_PATH, exist_ok=True)
 
-def normalize_audio(audio, target_rms=0.03):
-    rms = np.sqrt(np.mean(audio**2))
-    if rms > 0:
-        audio = audio * (target_rms / rms)
-    return audio
-
 def segment_audio(audio, sr, max_duration=SEGMENT_DURATION, hop=SEGMENT_HOP):
-    """
-    Splits `audio` into overlapping segments of `max_duration` seconds,
-    stepping by `hop` seconds.  If the clip is already ≤ max_duration it
-    is returned as-is (single-element list).
-
-    Returns
-    -------
-    List[np.ndarray]
-        Each element is one audio segment.
-    """
+    """Splits audio into overlapping segments."""
     total_duration = len(audio) / sr
     if total_duration <= max_duration:
         return [audio]
@@ -48,38 +26,21 @@ def segment_audio(audio, sr, max_duration=SEGMENT_DURATION, hop=SEGMENT_HOP):
     while start < len(audio):
         end = start + max_samples
         segment = audio[start:end]
-        # Discard very short tail segments (< 1 s)
-        if len(segment) / sr >= 1.0:
+        if len(segment) / sr >= 1.0:  # discard very short segments
             segments.append(segment)
         start += hop_samples
 
     return segments if segments else [audio]
 
-# -------------------------------
-# Feature Extraction
-# -------------------------------
 def extract_features_from_array(audio, sr, n_mfcc=40):
-    """
-    Extracts a rich set of audio features for emotion recognition
-    from a raw audio array.
-
-    Features included:
-      - Duration (seconds)
-      - MFCC + Delta MFCC (mean & std)
-      - Chroma (mean & std)
-      - Spectral centroid, bandwidth, rolloff, contrast (mean & std)
-      - Zero Crossing Rate (mean & std)
-      - RMS energy (mean & std)
-      - Pitch / F0 (mean & std)
-      - Tonnetz (mean & std)
-    """
+    """Extracts audio features from a raw audio array."""
     feats = []
 
     # Duration
     duration = len(audio) / sr
     feats.append(duration)
 
-    # MFCC
+    # MFCC + delta
     mfcc = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=n_mfcc)
     mfcc_delta = librosa.feature.delta(mfcc)
     feats.extend(np.mean(mfcc, axis=1))
@@ -125,154 +86,84 @@ def extract_features_from_array(audio, sr, n_mfcc=40):
 
     # Tonnetz
     try:
-        tonnetz = librosa.feature.tonnetz(
-            y=librosa.effects.harmonic(audio), sr=sr
-        )
+        tonnetz = librosa.feature.tonnetz(y=librosa.effects.harmonic(audio), sr=sr)
         feats.extend(np.mean(tonnetz, axis=1))
         feats.extend(np.std(tonnetz, axis=1))
     except Exception:
-        feats.extend([0.0] * 12)   # 6 mean + 6 std
+        feats.extend([0.0] * 12)  # fallback for tonnetz
 
     return np.array(feats, dtype=np.float32)
 
-
 def extract_features(file_path, n_mfcc=40, save_audio=False, processed_path=None):
-    """
-    Loads an audio file, trims silence, applies segmentation for clips
-    longer than SEGMENT_DURATION seconds, and returns a list of (filename, feature_vector).
-    
-    If save_audio is True, it also saves the segments to processed_path.
-    """
+    """Load audio, segment if needed, extract features."""
     try:
-        # Using librosa.load for better format support (mp3, flac, etc.)
         audio, sr = librosa.load(file_path, sr=None)
-        # Stereo → mono
         if audio.ndim > 1:
             audio = np.mean(audio, axis=1)
-        # Trim leading/trailing silence
         audio, _ = librosa.effects.trim(audio)
-        #normalize
-        audio = normalize_audio(audio)
-        # Segment if necessary
-        segments = segment_audio(audio, sr,
-                                  max_duration=SEGMENT_DURATION,
-                                  hop=SEGMENT_HOP)
-        
+        segments = segment_audio(audio, sr)
+
         file_name = os.path.basename(file_path)
         base_name = os.path.splitext(file_name)[0]
-        
-        # Save audio if requested
+
         if save_audio and processed_path:
             save_segments(file_name, segments, sr, processed_path)
-            
-        final_list = []
+
+        results = []
         for i, seg in enumerate(segments):
             feat = extract_features_from_array(seg, sr, n_mfcc=n_mfcc)
-            
-            # Determine effective filename for this chunk
-            if len(segments) == 1:
-                chunk_name = f"{base_name}.wav"
-            else:
-                chunk_name = f"{base_name}_chunk_{i+1}.wav"
-                
-            final_list.append((chunk_name, feat))
-            
-        return final_list
+            chunk_name = f"{base_name}_chunk_{i+1}.wav" if len(segments) > 1 else f"{base_name}.wav"
+            results.append((chunk_name, feat))
+        return results
 
     except Exception as e:
         print(f"Error processing {file_path}: {e}")
         return None
 
-
 def save_segments(file_name, segments, sr, processed_path):
-    """
-    Saves audio segments to the processed audio path.
-    If only one segment, saves with original name.
-    If multiple, saves with _chunk_n suffix.
-    """
     base_name = os.path.splitext(file_name)[0]
-    
     if len(segments) == 1:
-        out_path = os.path.join(processed_path, f"{base_name}.wav")
-        sf.write(out_path, segments[0], sr)
+        sf.write(os.path.join(processed_path, f"{base_name}.wav"), segments[0], sr)
     else:
         for i, seg in enumerate(segments):
-            out_path = os.path.join(processed_path, f"{base_name}_chunk_{i+1}.wav")
-            sf.write(out_path, seg, sr)
-
+            sf.write(os.path.join(processed_path, f"{base_name}_chunk_{i+1}.wav"), seg, sr)
 
 if __name__ == "__main__":
     filenames = []
     features  = []
-    segment_counts = {}   # track how many segments each file produced
 
     files = [f for f in os.listdir(DATASET_PATH) if f.lower().endswith((".flac", ".mp3"))]
 
     for file in tqdm(files, desc="Extracting features"):
         file_path = os.path.join(DATASET_PATH, file)
-
         processed_results = extract_features(file_path, save_audio=True, processed_path=PROCESSED_PATH)
         if processed_results is None:
             continue
-
-        segment_counts[file] = len(processed_results)
         for chunk_name, feat in processed_results:
             filenames.append(chunk_name)
             features.append(feat)
 
     X = np.array(features)
 
-    print(f"\nRaw dataset shape : {X.shape}")
-    multi_seg = {f: n for f, n in segment_counts.items() if n > 1}
-    print(f"Files segmented   : {len(multi_seg)} / {len(files)}")
-
-
-    scaler   = StandardScaler()
-    X_scaled = scaler.fit_transform(X).astype(np.float32)
-
-    print(f"Scaled  — mean ≈ {X_scaled.mean():.4f}  std ≈ {X_scaled.std():.4f}")
-
-    # Save the scaler so it can be reused at inference time
-    scaler_path = os.path.join(SAVE_PATH, "scaler.pkl")
-    joblib.dump(scaler, scaler_path)
-    print(f"✅ Scaler saved  : {scaler_path}")
-
-    num_mfcc        = 40
-    mfcc_cols       = ([f"mfcc_mean_{i+1}"       for i in range(num_mfcc)] +
-                       [f"mfcc_std_{i+1}"        for i in range(num_mfcc)])
-    mfcc_delta_cols = ([f"mfcc_delta_mean_{i+1}" for i in range(num_mfcc)] +
-                       [f"mfcc_delta_std_{i+1}"  for i in range(num_mfcc)])
-    chroma_cols     = ([f"chroma_mean_{i+1}"     for i in range(12)] +
-                       [f"chroma_std_{i+1}"      for i in range(12)])
+    # Define CSV column names
+    num_mfcc = 40
+    mfcc_cols       = [f"mfcc_mean_{i+1}"       for i in range(num_mfcc)] + [f"mfcc_std_{i+1}"        for i in range(num_mfcc)]
+    mfcc_delta_cols = [f"mfcc_delta_mean_{i+1}" for i in range(num_mfcc)] + [f"mfcc_delta_std_{i+1}"  for i in range(num_mfcc)]
+    chroma_cols     = [f"chroma_mean_{i+1}"     for i in range(12)] + [f"chroma_std_{i+1}"      for i in range(12)]
     spectral_cols   = ["centroid_mean",  "centroid_std",
                        "bandwidth_mean", "bandwidth_std",
                        "rolloff_mean",   "rolloff_std",
                        "contrast_mean",  "contrast_std"]
     zcr_rms_cols    = ["zcr_mean", "zcr_std", "rms_mean", "rms_std"]
     pitch_cols      = ["pitch_mean", "pitch_std"]
-    tonnetz_cols    = ([f"tonnetz_mean_{i+1}" for i in range(6)] +
-                       [f"tonnetz_std_{i+1}"  for i in range(6)])
+    tonnetz_cols    = [f"tonnetz_mean_{i+1}" for i in range(6)] + [f"tonnetz_std_{i+1}"  for i in range(6)]
     duration_col    = ["duration"]
 
-    all_columns = (["filename"] + duration_col + mfcc_cols + mfcc_delta_cols +
-                   chroma_cols + spectral_cols + zcr_rms_cols +
-                   pitch_cols + tonnetz_cols)
+    all_columns = ["filename"] + duration_col + mfcc_cols + mfcc_delta_cols + chroma_cols + spectral_cols + zcr_rms_cols + pitch_cols + tonnetz_cols
 
-    # Save raw (unscaled) CSV with filename
-    df_raw = pd.DataFrame(X, columns=all_columns[1:])
-    df_raw.insert(0, "filename", filenames)
-    csv_raw = os.path.join(SAVE_PATH, "features.csv")
-    df_raw.to_csv(csv_raw, index=False)
-    print(f"✅ Raw features CSV    : {csv_raw}")
-
-    # Save scaled CSV with filename
-    df_scaled = pd.DataFrame(X_scaled, columns=all_columns[1:])
-    df_scaled.insert(0, "filename", filenames)
-    csv_scaled = os.path.join(SAVE_PATH, "features_scaled.csv")
-    df_scaled.to_csv(csv_scaled, index=False)
-    print(f"✅ Scaled features CSV : {csv_scaled}")
-
-    np.save(os.path.join(SAVE_PATH, "X.npy"),        X)         # raw
-    np.save(os.path.join(SAVE_PATH, "X_scaled.npy"), X_scaled)  # standardized
-
-    print("\n✅ All artifacts saved in 'outputs/' and processed audio in 'test_processed/'")
+    df = pd.DataFrame(X, columns=all_columns[1:])
+    df.insert(0, "filename", filenames)
+    csv_path = os.path.join("outputs", "features.csv")
+    os.makedirs("outputs", exist_ok=True)
+    df.to_csv(csv_path, index=False)
+    print(f"✅ Features CSV saved: {csv_path}")

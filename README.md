@@ -6,12 +6,12 @@ The project is divided into four main tasks as outlined in the assignment, plus 
 
 ## Requirements
 
-1. **Python 3.11+** (Recommended)
+1. **Python 3.11** (Recommended)
 2. Install the required dependencies:
    ```bash
    pip install -r requirements.txt
    ```
-3. Set up your `.env` file (if you want to test the Gemini / Mistral API pathways):
+3. Set up your `.env` file (if you want to test the **optional** Gemini / Mistral API pathways):
    ```
    GOOGLE_API_KEY=your_gemini_api_key
    MISTRAL_API_KEY=your_mistral_api_key
@@ -52,6 +52,8 @@ python t1_feature_extraction.py
 **Files:** `t2.1_tone_classifier.py` and `t2.2_model_training.py`
 
 Since the dataset lacked manually-labelled emotional tones for storytelling, I used a Weak Supervision approach to pseudo-label the data using a text-based zero-shot Natural Language Inference (NLI) model (`facebook/bart-large-mnli`), heavily guided by acoustic heuristics extracted from the audio (such as pitch standard deviation or energy). 
+
+I also tried using CLAP which could be run using `failed_t2_clap.py` but it provided poor results, as could be seen by  outputs\clap_output.csv.
 
 The target classes are: `suspense`, `calm`, `urgency`, and `dramatic_emphasis`.
 
