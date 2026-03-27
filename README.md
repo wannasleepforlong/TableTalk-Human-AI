@@ -97,9 +97,9 @@ This is the interactive retrieval tool demonstrating the ability to query narrat
 3. A Hybrid Scoring algorithm scores each audio clip by calculating the distance between the user's semantic criteria and the clip's actual acoustic profiles.
 
 **Example Queries Supported:**
-- *"Calm narration spanning several seconds."*
-- *"Find a suspenseful moment with a hushed voice."*
-- *"Something upbeat and very urgent."*
+- *"Soothing short audio about water."*
+- *"Short audio mentions the date August 17 or a nearby date."*
+- *"Dramatic audio about sea."*
 
 **Usage:**
 ```bash
