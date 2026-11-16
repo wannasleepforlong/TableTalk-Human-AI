@@ -1,6 +1,6 @@
 # TableTalk Human-AI Technical Test
 
-This repository contains my submission for the TableTalk Human-AI Technical Test. The goal of this project is to build a prototype system that organizes and retrieves narrative voice recordings used in interactive storytelling environments.
+The goal of this project is to build a prototype system that organizes and retrieves narrative voice recordings used in interactive storytelling environments.
 
 The project is divided into four main tasks as outlined in the assignment, plus an exploration of the bonus storytelling analysis features.
 
